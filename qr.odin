@@ -668,15 +668,14 @@ generate_data_bits :: proc(
 		bit_cursor                += 8
 	}
 
-	append_bits(out, &bit_cursor, 0, 4) // zero padding up to the next full byte
-
+	bit_cursor += 4 // zero padding up to the next full byte
 	return bit_cursor >> 3
 }
 
 evaluate_mask :: proc(mask, row, col: int) -> bool {
 	switch (mask) {
 	case 0:
-		return ((col + row) % 2) == 0
+		return (col + row) % 2 == 0
 	case 1:
 		return row % 2 == 0
 	case 2:
@@ -684,7 +683,7 @@ evaluate_mask :: proc(mask, row, col: int) -> bool {
 	case 3:
 		return (col + row) % 3 == 0
 	case 4:
-		return ((row / 2 + col / 3) % 2) == 0
+		return (row / 2 + col / 3) % 2 == 0
 	case 5:
 		return ((row * col) % 2) + ((row * col) % 3) == 0
 	case 6:
@@ -807,7 +806,7 @@ place_data_bits :: proc(
 error_correction_codes_generate :: proc(
 	info: Error_Correction_Info,
 	data: []byte,
-	ecs:  []byte,
+	ecc:  []byte,
 ) {
 	assert(len(data) == int(info.data_words))
 
@@ -817,7 +816,7 @@ error_correction_codes_generate :: proc(
 	_m := make(Galois_Polynomial, max(info.data_words_per_block_group1, info.data_words_per_block_group2) + info.error_words_per_block, context.temp_allocator)
 	m := _m[:info.data_words_per_block_group1 + info.error_words_per_block]
 
-	data_offset, ecs_offset: int
+	data_offset, ecc_offset: int
 
 	for _ in 0 ..< info.blocks_group1 {
 		slice.zero(m)
@@ -830,8 +829,8 @@ error_correction_codes_generate :: proc(
 		out := m[:info.error_words_per_block]
 		slice.reverse(out)
 
-		copy(ecs[ecs_offset:], out)
-		ecs_offset  += len(out)
+		copy(ecc[ecc_offset:], out)
+		ecc_offset  += len(out)
 		data_offset += int(info.data_words_per_block_group1)
 	}
 
@@ -848,23 +847,23 @@ error_correction_codes_generate :: proc(
 		out := m[:info.error_words_per_block]
 		slice.reverse(out)
 
-		copy(ecs[ecs_offset:], out)
-		ecs_offset  += len(out)
+		copy(ecc[ecc_offset:], out)
+		ecc_offset  += len(out)
 		data_offset += int(info.data_words_per_block_group2)
 	}
 }
 
 @(private, rodata)
 remainder_bits := [VERSION_MAX + 1]u8 {
-	1 = 0,
-	2 = 7,
-	3 = 7,
-	4 = 7,
-	5 = 7,
-	6 = 7,
-	7 = 0,
-	8 = 0,
-	9 = 0,
+	 1 = 0,
+	 2 = 7,
+	 3 = 7,
+	 4 = 7,
+	 5 = 7,
+	 6 = 7,
+	 7 = 0,
+	 8 = 0,
+	 9 = 0,
 	10 = 0,
 	11 = 0,
 	12 = 0,
@@ -897,3 +896,165 @@ remainder_bits := [VERSION_MAX + 1]u8 {
 	39 = 0,
 	40 = 0,
 }
+
+@(require_results)
+evaluate_penalty :: proc(pixels: []byte, size: int) -> (penalty: int) {
+	PATTERN_1 :: 0b01000101111
+	PATTERN_2 :: 0b11110100010
+
+	n_dark: int
+	for row in 0 ..< size {
+		window: u16
+
+		run := 0
+		run_value: u8
+		for col in 0 ..< size {
+			v := pixels[col + row * size] & 1
+
+			window <<= 1
+			window  |= u16(v)
+			window  &= (1 << 12) - 1
+
+			if (window == PATTERN_1 || window == PATTERN_2) && row >= 11 {
+				penalty += 40
+			}
+
+			if v & 1 == 0 {
+				n_dark += 1
+			}
+			if v == run_value {
+				run += 1
+			} else {
+				if (run >= 5) {
+					penalty += 3 + run - 5;
+				}
+				run       = 1
+				run_value = v
+			}
+
+			// squares
+			if row + 1 < size && col + 1 < size &&
+				v == pixels[col + 1 + (row + 0) * size] & 1 &&
+				v == pixels[col + 0 + (row + 1) * size] & 1 &&
+				v == pixels[col + 1 + (row + 1) * size] & 1
+			{
+				penalty += 3
+			}
+		}
+	}
+
+	for col in 0 ..< size {
+		window: u16
+
+		run := 0
+		run_value: u8
+		for row in 0 ..< size {
+			v := pixels[col + row * size] & 1
+
+			window <<= 1
+			window  |= u16(v)
+			window  &= (1 << 12) - 1
+
+			if (window == PATTERN_1 || window == PATTERN_2) && col >= 11 {
+				penalty += 40
+			}
+
+			if v == run_value {
+				run += 1
+			} else {
+				if (run >= 5) {
+					penalty += 3 + run - 5;
+				}
+				run       = 1
+				run_value = v
+			}
+		}
+	}
+
+	portion_dark  := int(100 * f64(n_dark) / f64(size * size))
+	prev_multiple := (portion_dark / 5) * 5
+	next_multiple := prev_multiple + 5
+
+	prev_multiple  = abs(prev_multiple - 50)
+	next_multiple  = abs(next_multiple - 50)
+
+	penalty       += min(prev_multiple, next_multiple) / 5 * 10
+
+	return
+}
+
+@(export)
+change_mask :: proc(pixels: []u8, size: int, old, new: int) {
+	for row in 0 ..< size {
+		for col in 0 ..< size {
+			if pixels[col + row * size] & FIXED_MASK != 0 {
+				pixels[col + row * size] ~= u8(evaluate_mask(old, row, col) ~ evaluate_mask(new, row, col))
+			}
+		}
+	}
+}
+
+bitmap_width :: proc(data_len: int, correction_level: Error_Correction_Level) -> (size: int, ok: bool) {
+	version := required_version(data_len, correction_level)
+	if version < 0 {
+		return
+	}
+
+	return version_size(version), true
+}
+
+version_size :: proc(version: int) -> int {
+	return (version - 1) * 4 + 21
+}
+
+generate_bitmap_bytes :: proc(
+	bitmap:   []u8,
+	data:     []byte,
+	ec_level: Error_Correction_Level,
+	mask := -1,
+) {
+	version := required_version(len(data), ec_level)
+	size    := version_size(version)
+	place_fixed_patterns(bitmap, size, version)
+	place_info_bits(bitmap, size, version, ec_level, mask)
+
+	eci := error_correction_infos[version][ec_level]
+
+	_data_bits := make([]byte, eci.data_words + eci.error_words_per_block * (eci.blocks_group1 + eci.blocks_group2))
+	data_bits  := _data_bits[:eci.data_words]
+	ecc_bits   := _data_bits[eci.data_words:]
+	n          := generate_data_bits(version, ec_level, data, data_bits)
+
+	PAD_A :: u8(0b00110111)
+	PAD_B :: u8(0b10001000)
+
+	pad := PAD_A
+	for n < int(eci.data_words) {
+		data_bits[n] = pad
+		n           += 1
+		pad         ~= PAD_A ~ PAD_B
+	}
+
+	error_correction_codes_generate(eci, data_bits, ecc_bits)
+
+	place_data_bits(bitmap, size, eci, version, data_bits, ecc_bits, mask)
+
+	finalize(bitmap)
+
+	return
+}
+
+generate_bitmap_string :: proc(
+	data:     string,
+	bitmap:   []u8,
+	ec_level: Error_Correction_Level,
+	mask := -1,
+) {
+	generate_bitmap_bytes(bitmap, transmute([]byte)data, ec_level, mask)
+}
+
+generate_bitmap :: proc {
+	generate_bitmap_bytes,
+	generate_bitmap_string,
+}
+
