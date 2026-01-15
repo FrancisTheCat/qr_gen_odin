@@ -16,7 +16,10 @@ Error_Correction_Level :: enum {
 	H = High,
 }
 
-VERSION_MAX :: 40
+VERSION_MAX        :: 40
+VERSION_TABLE_SIZE :: VERSION_MAX + 1
+
+MASK_AUTOMATIC :: -1
 
 @(private, rodata)
 level_capacities := [Error_Correction_Level][VERSION_MAX]i16 {
@@ -56,7 +59,7 @@ Error_Correction_Info :: struct {
 }
 
 @(private, rodata)
-error_correction_infos := [VERSION_MAX + 1 /* one based indexing */][Error_Correction_Level]Error_Correction_Info {
+error_correction_infos := [VERSION_TABLE_SIZE][Error_Correction_Level]Error_Correction_Info {
 	1 = {
 		.L = {   19,  7,  1,  19,  0,   0 },
 		.M = {   16, 10,  1,  16,  0,   0 },
@@ -384,7 +387,7 @@ character_count_bits :: proc(version: int) -> int {
 }
 
 @(private, rodata)
-alignment_locations := [VERSION_MAX + 1][7]u8 {
+alignment_locations := [VERSION_TABLE_SIZE][7]u8 {
 	2  = { 6, 18,  0,  0,   0,   0,   0, },
 	3  = { 6, 22,  0,  0,   0,   0,   0, },
 	4  = { 6, 26,  0,  0,   0,   0,   0, },
@@ -430,7 +433,7 @@ alignment_locations := [VERSION_MAX + 1][7]u8 {
 FIXED_MASK :: 0x80
 
 place_fixed_patterns :: proc(pixels: []u8, size: int, version: int) {
-	finder_pixel :: proc(pixels: []u8, size: int, x, y: int, v: bool) {
+	finder_pixel :: proc(pixels: []u8, size, x, y: int, v: bool) {
 		pixels[x            +  y * size            ] = u8(v) | FIXED_MASK
 		pixels[size - x - 1 +  y * size            ] = u8(v) | FIXED_MASK
 		pixels[x            + (size - y - 1) * size] = u8(v) | FIXED_MASK
@@ -668,8 +671,7 @@ generate_data_bits :: proc(
 		bit_cursor                += 8
 	}
 
-	bit_cursor += 4 // zero padding up to the next full byte
-	return bit_cursor >> 3
+	return (bit_cursor + 4) >> 3
 }
 
 evaluate_mask :: proc(mask, row, col: int) -> bool {
@@ -814,7 +816,7 @@ error_correction_codes_generate :: proc(
 	galois_polynomial_generator(g)
 
 	_m := make(Galois_Polynomial, max(info.data_words_per_block_group1, info.data_words_per_block_group2) + info.error_words_per_block, context.temp_allocator)
-	m := _m[:info.data_words_per_block_group1 + info.error_words_per_block]
+	m  := _m[:info.data_words_per_block_group1 + info.error_words_per_block]
 
 	data_offset, ecc_offset: int
 
@@ -854,7 +856,7 @@ error_correction_codes_generate :: proc(
 }
 
 @(private, rodata)
-remainder_bits := [VERSION_MAX + 1]u8 {
+remainder_bits := [VERSION_TABLE_SIZE]u8 {
 	 1 = 0,
 	 2 = 7,
 	 3 = 7,
@@ -898,9 +900,19 @@ remainder_bits := [VERSION_MAX + 1]u8 {
 }
 
 @(require_results)
-evaluate_penalty :: proc(pixels: []byte, size: int) -> (penalty: int) {
+evaluate_penalty :: proc(pixels: []byte, size: int) -> int {
+	penalty_squares:     int
+	penalty_consecutive: int
+	penalty_pattern:     int
+	penalty_balance:     int
+
 	PATTERN_1 :: 0b01000101111
 	PATTERN_2 :: 0b11110100010
+
+	// store state of the vertical 
+	windows    := make([]u16, size, context.temp_allocator)
+	// runs       := make([]u16, size, context.temp_allocator)
+	// run_values := make([]u8,  size, context.temp_allocator)
 
 	n_dark: int
 	for row in 0 ..< size {
@@ -911,34 +923,38 @@ evaluate_penalty :: proc(pixels: []byte, size: int) -> (penalty: int) {
 		for col in 0 ..< size {
 			v := pixels[col + row * size] & 1
 
+			// Balance
+			if v == 0 {
+				n_dark += 1
+			}
+
+			// Pattern
 			window <<= 1
 			window  |= u16(v)
 			window  &= (1 << 12) - 1
 
 			if (window == PATTERN_1 || window == PATTERN_2) && row >= 11 {
-				penalty += 40
+				penalty_pattern += 40
 			}
 
-			if v & 1 == 0 {
-				n_dark += 1
-			}
+			// Run lengths
 			if v == run_value {
 				run += 1
 			} else {
 				if (run >= 5) {
-					penalty += 3 + run - 5;
+					penalty_consecutive += 3 + run - 5;
 				}
 				run       = 1
 				run_value = v
 			}
 
-			// squares
-			if row + 1 < size && col + 1 < size &&
-				v == pixels[col + 1 + (row + 0) * size] & 1 &&
-				v == pixels[col + 0 + (row + 1) * size] & 1 &&
-				v == pixels[col + 1 + (row + 1) * size] & 1
+			// Squares
+			if row > 0 && col > 0 &&
+				v == pixels[col - 1 + (row - 0) * size] & 1 &&
+				v == pixels[col - 0 + (row - 1) * size] & 1 &&
+				v == pixels[col - 1 + (row - 1) * size] & 1
 			{
-				penalty += 3
+				penalty_squares += 3
 			}
 		}
 	}
@@ -956,14 +972,14 @@ evaluate_penalty :: proc(pixels: []byte, size: int) -> (penalty: int) {
 			window  &= (1 << 12) - 1
 
 			if (window == PATTERN_1 || window == PATTERN_2) && col >= 11 {
-				penalty += 40
+				penalty_pattern += 40
 			}
 
 			if v == run_value {
 				run += 1
 			} else {
 				if (run >= 5) {
-					penalty += 3 + run - 5;
+					penalty_consecutive += 3 + run - 5;
 				}
 				run       = 1
 				run_value = v
@@ -971,31 +987,30 @@ evaluate_penalty :: proc(pixels: []byte, size: int) -> (penalty: int) {
 		}
 	}
 
-	portion_dark  := int(100 * f64(n_dark) / f64(size * size))
-	prev_multiple := (portion_dark / 5) * 5
-	next_multiple := prev_multiple + 5
+	portion_dark   := int(100 * f64(n_dark) / f64(size * size))
+	prev_multiple  := (portion_dark / 5) * 5
+	next_multiple  := prev_multiple + 5
 
-	prev_multiple  = abs(prev_multiple - 50)
-	next_multiple  = abs(next_multiple - 50)
+	prev_multiple   = abs(prev_multiple - 50)
+	next_multiple   = abs(next_multiple - 50)
 
-	penalty       += min(prev_multiple, next_multiple) / 5 * 10
+	penalty_balance = min(prev_multiple, next_multiple) / 5 * 10
 
-	return
+	return penalty_squares + penalty_consecutive + penalty_pattern + penalty_balance
 }
 
-@(export)
 change_mask :: proc(pixels: []u8, size: int, old, new: int) {
 	for row in 0 ..< size {
 		for col in 0 ..< size {
-			if pixels[col + row * size] & FIXED_MASK != 0 {
+			if pixels[col + row * size] & FIXED_MASK == 0 {
 				pixels[col + row * size] ~= u8(evaluate_mask(old, row, col) ~ evaluate_mask(new, row, col))
 			}
 		}
 	}
 }
 
-bitmap_width :: proc(data_len: int, correction_level: Error_Correction_Level) -> (size: int, ok: bool) {
-	version := required_version(data_len, correction_level)
+bitmap_width :: proc(data_len: int, correction_level: Error_Correction_Level, min_version := 1) -> (size: int, ok: bool) {
+	version := max(required_version(data_len, correction_level), min_version)
 	if version < 0 {
 		return
 	}
@@ -1011,16 +1026,17 @@ generate_bitmap_bytes :: proc(
 	bitmap:   []u8,
 	data:     []byte,
 	ec_level: Error_Correction_Level,
-	mask := -1,
+	mask        := MASK_AUTOMATIC,
+	min_version := 1,
 ) {
-	version := required_version(len(data), ec_level)
+	version := max(min_version, required_version(len(data), ec_level))
 	size    := version_size(version)
+	slice.fill(bitmap, 0)
 	place_fixed_patterns(bitmap, size, version)
-	place_info_bits(bitmap, size, version, ec_level, mask)
 
 	eci := error_correction_infos[version][ec_level]
 
-	_data_bits := make([]byte, eci.data_words + eci.error_words_per_block * (eci.blocks_group1 + eci.blocks_group2))
+	_data_bits := make([]byte, eci.data_words + eci.error_words_per_block * (eci.blocks_group1 + eci.blocks_group2), context.temp_allocator)
 	data_bits  := _data_bits[:eci.data_words]
 	ecc_bits   := _data_bits[eci.data_words:]
 	n          := generate_data_bits(version, ec_level, data, data_bits)
@@ -1037,7 +1053,31 @@ generate_bitmap_bytes :: proc(
 
 	error_correction_codes_generate(eci, data_bits, ecc_bits)
 
-	place_data_bits(bitmap, size, eci, version, data_bits, ecc_bits, mask)
+	if mask >= 0 {
+		assert(mask < 8)
+		place_info_bits(bitmap, size, version, ec_level, mask)
+		place_data_bits(bitmap, size, eci, version, data_bits, ecc_bits, mask)
+	} else {
+		place_info_bits(bitmap, size, version, ec_level, 0)
+		place_data_bits(bitmap, size, eci, version, data_bits, ecc_bits, 0)
+
+		best_score := evaluate_penalty(bitmap, size)
+		best_mask  := 0
+		for mask in 1 ..< 8 {
+			change_mask(bitmap, size, mask - 1, mask)
+			place_info_bits(bitmap, size, version, ec_level, mask)
+			score := evaluate_penalty(bitmap, size)
+			if score < best_score {
+				best_score = score
+				best_mask  = mask
+			}
+		}
+
+		if best_mask != 7 {
+			place_info_bits(bitmap, size, version, ec_level, best_mask)
+			change_mask(bitmap, size, 7, best_mask)
+		}
+	}
 
 	finalize(bitmap)
 
@@ -1048,13 +1088,13 @@ generate_bitmap_string :: proc(
 	data:     string,
 	bitmap:   []u8,
 	ec_level: Error_Correction_Level,
-	mask := -1,
+	mask        := MASK_AUTOMATIC,
+	min_version := 1,
 ) {
-	generate_bitmap_bytes(bitmap, transmute([]byte)data, ec_level, mask)
+	generate_bitmap_bytes(bitmap, transmute([]byte)data, ec_level, mask, min_version)
 }
 
 generate_bitmap :: proc {
 	generate_bitmap_bytes,
 	generate_bitmap_string,
 }
-
