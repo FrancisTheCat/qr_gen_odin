@@ -4,7 +4,7 @@ package qr_odin
 
 VERSION_TABLE_SIZE :: VERSION_MAX + 1 // one based indexing
 
-@(private, rodata)
+@(rodata)
 remainder_bits := [VERSION_TABLE_SIZE]u8 {
 	 1 = 0,
 	 2 = 7,
@@ -48,7 +48,7 @@ remainder_bits := [VERSION_TABLE_SIZE]u8 {
 	40 = 0,
 }
 
-@(private, rodata)
+@(rodata)
 level_capacities := [Error_Correction_Level][VERSION_MAX]i16 {
 	.L = {
 		17,   32,   53,   78,   106,  134,  154,  192,  230,  271,
@@ -85,7 +85,7 @@ Error_Correction_Info :: struct {
 	data_words_per_block_group2: i16,
 }
 
-@(private, rodata)
+@(rodata)
 error_correction_infos := [VERSION_TABLE_SIZE][Error_Correction_Level]Error_Correction_Info {
 	1 = {
 		.L = {   19,  7,  1,  19,  0,   0 },
@@ -329,7 +329,7 @@ error_correction_infos := [VERSION_TABLE_SIZE][Error_Correction_Level]Error_Corr
 	},
 }
 
-@(private, rodata)
+@(rodata)
 alignment_locations := [VERSION_TABLE_SIZE][7]u8 {
 	2  = { 6, 18,  0,  0,   0,   0,   0, },
 	3  = { 6, 22,  0,  0,   0,   0,   0, },
@@ -372,7 +372,7 @@ alignment_locations := [VERSION_TABLE_SIZE][7]u8 {
 	40 = { 6, 30, 58, 86, 114, 142, 170, },
 }
 
-@(private, rodata)
+@(rodata)
 format_strings := [Error_Correction_Level][8]u16 {
 	.L = {
 		0b111011111000100,
@@ -416,7 +416,7 @@ format_strings := [Error_Correction_Level][8]u16 {
 	},
 }
 
-@(private, rodata)
+@(rodata)
 version_info_strings := [41]u32 {
 	 7 = 0b000111110010010100,
 	 8 = 0b001000010110111100,
